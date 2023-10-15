@@ -1,0 +1,338 @@
+---
+title: "Size correcting landmarks and analysis for R geomorph"
+output:
+  github_document:
+    html_preview: false
+  pdf_document:
+    df_print: kable
+  html_notebook:
+    fig_caption: yes
+    df_print: paged
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+---
+
+This bit of code will read your landmark file into R, label and order the landmarks into the format geomorph needs, calculate the correction factor based the size standard from phenopype, and perform the size correction. 
+
+This first bit of code will load the necessary libraries and set the working directory to the folder where this notebook is saved.
+
+```{r,results='hide', message=FALSE, warning=FALSE}
+rm(list=ls())
+
+library(geomorph)
+library(stringr)
+library(dplyr)
+library(ggplot2)
+library(readr)
+library(ggpattern)
+library(ggpubr)
+library(car)
+library(ggrepel)
+
+
+```
+
+We can then load in our landmark coordinates
+
+```{r}
+#import uncorrected (size) landmarks
+tmp <- read.csv("GL19_Closed_Coord_Full.csv", header=T)
+
+tmp  <-   tmp %>% 
+     filter(Quality == "p") %>% 
+        na.omit
+
+
+names <- tmp[,1] #create an object ("names") with sample names and info from column 1 of the imported data sheet
+
+```
+
+Adjust these next variables to suit your landmarking scheme. In the example data set, there are a total of 25 landmarks on each image.
+
+```{r}
+NumLandmarks = 25
+```
+
+We then pull the appropriate columns (X or Y coordinates) into separate X and Y data frames for numbering the landmarks.
+
+```{r}
+x<-tmp[,6:30]
+y<-tmp[,31:55]
+```
+
+This bit of code creates a numbered list of X and Y values corresponding to the total number of landmarks indicated in the 'NumLandmarks' variable, from 1 to 25 in this case, and then adds those values to the X and Y coordinate data frames created above.
+
+```{r}
+prefix_x <- c(paste("0", seq(1:9), sep = ""), seq(from = 10, to = NumLandmarks))
+suffix_x <- "_X"
+
+my.names_x <- paste(prefix_x, suffix_x, sep = "")
+
+colnames(x) <- my.names_x
+
+
+prefix_y <- c(paste("0", seq(1:9), sep = ""), seq(from = 10, to = NumLandmarks))
+suffix_y <- "_Y"
+
+my.names_y <- paste(prefix_y, suffix_y, sep = "")
+
+colnames(y) <- my.names_y
+
+rownames(x) <- sub("X.", "", rownames(x))
+rownames(y) <- sub("Y.", "", rownames(y))
+
+x <- cbind(names,x)
+y <- cbind(names,y)
+```
+
+We can then merge our separated, labeled X and Y coordinate data frames, and sort them (in ascending order) by the landmark number, resulting in a data frame that has each landmarks X and Y coordinates in order, e.g. 01_X, 01_Y, 02_X, 02_Y, ...
+
+```{r}
+UnsortedCoords <- merge(x,y, by = 1)
+
+LabeledCoords <- UnsortedCoords[ , order(names(UnsortedCoords))]
+
+head(LabeledCoords)
+```
+
+
+We take the distance (in pixels) from the size standard and write that information into a new column (NumPix) on our coordinate data frame.
+
+```{r}
+NumPix <- tmp[c("FishEc","V2")]
+
+LabeledCoords <- merge(NumPix,LabeledCoords,by.x = "FishEc",by.y = "names")
+
+```
+
+Using this distance (i.e. the number of pixels that equals X mm in each photograph), we can calculate a correction factor (cf) that we will multiply all of our landmarks by to ‘resize’ them to account for variation in distance between the camera and the specimen across photos. This is simply a constant value (10 here) divided by the number of pixels between our known distance (the size standard).
+
+```{r}
+LabeledCoords$CorFact <- as.numeric(100/LabeledCoords$V2)
+```
+
+
+We then multiply all of our landmarks by this correction factor to size correct them. 
+```{r}
+#need to multiply all values by cor fact.
+#subset new values into new matrix with sample names and use that as input for geomorph
+size_corr_landmarks <- LabeledCoords[3:52] * LabeledCoords$CorFact
+```
+
+
+Here we are taking the row names from our previous data frame and binding them to our new, size corrected landmarks for each specimen. Then we create a vector containing that specimen ID information ('names') for later use and throw out unused landmarks (those that don't contain shape information).
+```{r}
+names <- LabeledCoords[,1] #create an object ("names") with sample names and info from column 1
+
+
+size_corr_landmarks <- cbind(names, size_corr_landmarks)
+
+
+names(size_corr_landmarks)[1] <- "ID"
+
+
+names <- size_corr_landmarks[,1] #create an object ("names") with sample names and info from column 1
+
+#drop unused landmarks
+size_corr_landmarks <- subset(size_corr_landmarks, select=-c(6:7,14:15,18:23,38:39))
+
+
+```
+
+
+
+Now we can load our size corrected landmarks into the R geomorph array format. 
+
+```{r}
+
+#size_corr_landmarks[,2:ncol(tmp)] is telling the "arrayspecs" function to that the landmark data starts at column 2  from the "size_corr_landmarks" dataframe and continues to the end of the dataframe
+#the 19 here is the number of landmarks, 
+#the 2 is the number of dimensions (Just X and Y for us) 
+coords <- arrayspecs(size_corr_landmarks[,2:ncol(size_corr_landmarks)], 19, 2) 
+```
+
+
+We can add our specimen IDs to the coordinate array we just created using the 'names' vector from above.
+```{r}
+dimnames(coords)[[3]] <- names 
+```
+
+
+Lastly, we can use Generalized Procrustes Analysis (GPA) to align our landmarks from the specimens (to adjust for landmark variation that is due to differences in the photograph angles or specimen position) and plot the aligned landmark coordinates to make sure we see a shape that resembles our landmarking data set. You should see the landmarks falling into the rough shape of your specimens in the created plot. If not, something probably went wrong with your column specification somewhere above. The average location for each landmark is a large black dot, and the smaller gray points represent the aligned data from all the specimens for each landmark.
+
+```{r}
+GPA <- gpagen(coords, PrinAxes = T, Proj = T, ProcD = T)
+GPA$coords <- GPA$coords * -1
+
+
+landmark_plot <- plot(GPA)
+
+landmark_summary <- summary(GPA)
+
+meanshape <- mshape(GPA$coords, na.action = 1) #save the mean shape for use later, we will see how variation along specific axes warps the mean shape
+```
+
+We can examine the variation in body shape among our samples using PCA. First we run a PCA on the aligned coordinates from above.
+```{r}
+ShapePC <- gm.prcomp(GPA$coords, phy = NULL)
+summary(ShapePC)
+
+ShapeCoordinates <- ShapePC$x
+```
+
+
+The line below creates a basic plot showing variation in body shape along the first two axes of variation from our PCA
+we can use this to see how our samples group.
+```{r}
+plot(ShapePC, pch=21, cex = 1.5)
+```
+
+In the above plot we see a few clear outlier individuals on PC2, so we will drop them from the data set and re-run the PCA. 
+```{r} 
+#drop outlier individuals driving shape variation based on their row number
+omit <- c(1486,1490) 
+coords.1 <- coords[,,-omit]
+
+#re-run the General Procrustes Analysis on the reduced dataset
+GPA <- gpagen(coords.1, PrinAxes = T, Proj = T, ProcD = T)
+GPA$coords <- GPA$coords * -1
+
+#re-run PCA on the final set of specimens
+ShapePC <- gm.prcomp(GPA$coords, phy = NULL)
+summary(ShapePC)
+
+ShapeCoordinates <- ShapePC$x
+
+#save the PCA to a csv if needed
+#write.csv(ShapeCoordinates, "GeomorphPCA.csv")
+
+#The line below creates a basic plot showing variation in body shape along the first two axes of variation from our PCA
+#we can use this to see how our samples group, in this plot we see a clear divide along PC1, which happens to be between the sexes for this example
+plot(ShapePC, pch=21, cex = 1.5)
+```
+
+These next steps will help us to visualize variation along the first few PCs.
+
+You can use the picknplot tool to click on any area of the shape space and create a visualization of what a specimen would like at that point, this is particularly useful for quickly looking at how shape varies along each axis or for looking at weird outlier individuals 
+```{r}
+#picknplot.shape(plot(ShapePC, pch=21, cex = 1.5))
+```
+
+Let's visualize variation along a specific axis, PC1.
+```{r}
+PC.Scores <- as.data.frame(ShapePC$x)
+
+PC <- PC.Scores$Comp1
+
+#using the min and max values of data on the PC for visualization
+predictor<- shape.predictor(GPA$coords, x = PC, Intercept = FALSE, method = c("LS"), pred1= min(PC), pred2=max(PC)) 
+
+#this is a file telling R which landmarks should be connected by lines to visualize the outline of the fish
+link <- read.csv("link.csv",header = 1)
+links <- link[c(2:3)]
+
+ 
+
+M <- mshape(GPA$coords)
+plotRefToTarget(M, predictor$pred1, links = links)
+plotRefToTarget(M, predictor$pred2, links = links)
+```
+
+Clearly the first PC is driven by the bending of specimens during storage. We can disregard this PC (as per [Paccard et al 2021](https://doi.org/10.1093/jhered/esz056), and focus on PC2 onward. 
+
+```{r}
+PC <- PC.Scores$Comp2
+
+#using the min and max values of data on the PC for visualization
+predictor<- shape.predictor(GPA$coords, x = PC, Intercept = FALSE, method = c("LS"), pred1= min(PC), pred2=max(PC)) 
+
+#this is a file telling R which landmarks should be connected by lines to visualize the outline of the fish
+link <- read.csv("link.csv",header = 1)
+links <- link[c(2:3)]
+
+ 
+plotRefToTarget(M, predictor$pred1, links = links)
+plotRefToTarget(M, predictor$pred2, links = links)
+```
+
+Variation on PC2 looks more reasonable, something resembling benthic/limnetic type shape variation. 
+
+
+It's also possible to use values outside the actual data on the PC to exagerate differences for visualization if things are very subtle. Not needed in this case, but might be useful to know about. In this case it really highlights where the major changes in body shape occur on PC2: the caudaul peduncle and body depth.
+```{r}
+predictor<- shape.predictor(GPA$coords, x = PC, Intercept = FALSE, method = c("LS"), pred1= (2*min(PC)), pred2=(2*max(PC)))
+
+plotRefToTarget(M, predictor$pred1, links = links)
+plotRefToTarget(M, predictor$pred2, links = links)
+```
+
+To see where specific populations fall out in this shape space we can take the PC scores and plot the points with more information in ggplot.
+
+```{r}
+#Add sample info to PC scores
+Sample_info <- read.csv("Fishec_Fish_2019.csv")
+SampleInfo <- merge (Sample_info, PC.Scores, by.x = ("FishEc"), by.y = ("row.names"), all.y = TRUE)
+
+
+#Add information about the lakes
+LakeInfo <- read.csv("GL_Lake_Master.csv")
+LakeInfo<-LakeInfo[(LakeInfo$Year=="2019"),] #data for sampling year
+LakeInfo <- LakeInfo[, c(2,11,12,14)] #subset to relevant info
+Final_Sample_Info <- merge(SampleInfo, LakeInfo, by.x = ("Site"), by.y = ("Lake"), all.x = TRUE)
+
+
+summary(ShapePC)
+
+#calculate percent variance explained by each axis
+PoV <- ShapePC$sdev^2/sum(ShapePC$sdev^2)
+
+
+#Calculate population means and standard deviations
+gd1 <- Final_Sample_Info %>% 
+  dplyr::group_by(Site) %>% # Group the data by sample site
+  dplyr::summarize(mean_Comp1=mean(Comp1), # Create variable with mean of PC per group
+                   mean_Comp2=mean(Comp2),
+                   mean_Comp3=mean(Comp3),
+                   mean_Comp4=mean(Comp4),
+                   sd_Comp.1=sd(Comp1), # Create variable with sd of PC per group
+                   sd_Comp.2=sd(Comp2),
+                   sd_Comp.3=sd(Comp3),
+                   sd_Comp.4=sd(Comp4),
+                   N_PC=n(), # Create new variable N of PC per group
+                   se1=sd_Comp.1/sqrt(N_PC), # Create variable with se of PC per group
+                   se2=sd_Comp.2/sqrt(N_PC), 
+                   se3=sd_Comp.3/sqrt(N_PC),
+                   se4=sd_Comp.4/sqrt(N_PC),
+                   upper_limit1=mean_Comp1+se1, # Upper limit
+                   lower_limit1=mean_Comp1-se1, # Lower limit
+                   upper_limit2=mean_Comp2+se2, # Upper limit
+                   lower_limit2=mean_Comp2-se2, # Lower limit
+                   upper_limit3=mean_Comp3+se3, # Upper limit
+                   lower_limit3=mean_Comp3-se3, # Lower limit
+                   upper_limit4=mean_Comp4+se4, # Upper limit
+                   lower_limit4=mean_Comp4-se4 # Lower limit
+  ) 
+
+gd1   <- merge(LakeInfo, gd1, by.x = ("Lake"), by.y = ("Site"), all.y = TRUE)
+
+#rename calculated mean columns
+colnames(gd1)[5] <- "PC1"
+colnames(gd1)[6] <- "PC2"
+colnames(gd1)[7] <- "PC3"
+colnames(gd1)[8] <- "PC4"
+
+
+#make the plot for PC2 vs PC3
+b <- ggplot(data=gd1, aes(PC2, PC3)) + 
+  geom_errorbar(data=gd1, aes(ymin=lower_limit3, ymax=upper_limit3,width=0.001)) +
+  geom_errorbarh(data=gd1, aes(xmin = lower_limit2,xmax = upper_limit2, height=0.001)) +
+  geom_point(data=gd1, aes(PC2, PC3, shape=Fish, color=Fish, size = Areaha)) + theme_pubr() +
+  geom_text_repel(data = gd1, aes(label=Lake)) +
+  xlab(paste0("PC2 (", round((100*PoV[2]),2), "%)")) + 
+  ylab(paste0("PC3 (", round((100*PoV[3]),2), "%)"))
+
+b
+
+```
+
